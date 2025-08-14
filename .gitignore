@@ -1,0 +1,21 @@
+# Go
+bin/
+build/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+
+# Env
+.env
+.env.*
+
+# Misc
+.DS_Store
