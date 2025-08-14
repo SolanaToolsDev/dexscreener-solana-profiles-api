@@ -40,9 +40,6 @@ const etagKey = "dex:latest:etag"
 func Run(ctx context.Context, rdb *redis.Client, cfg config.Config) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	// daily clear at midnight UTC
-	go scheduleDailyClear(ctx, rdb, cfg)
-
 	for {
 		if err := tick(ctx, rdb, cfg, client); err != nil {
 			log.Printf("poll error: %v", err)
@@ -133,69 +130,21 @@ func tick(ctx context.Context, rdb *redis.Client, cfg config.Config, httpc *http
 		pipe.ZAdd(ctx, "z:tokens:latest", redis.Z{Score: float64(now), Member: addr})
 		pipe.ZAdd(ctx, "z:"+cfg.PollerChain+":latest", redis.Z{Score: float64(now), Member: addr})
 	}
-	_, err = pipe.Exec(ctx)
-	return err
+	if _, err = pipe.Exec(ctx); err != nil {
+		return err
+	}
+
+	// Trim sorted sets to last N hours worth of items by score if TTL configured
+	if cfg.TokenTTLHours > 0 {
+		cutoff := float64(time.Now().Add(-time.Duration(cfg.TokenTTLHours) * time.Hour).UnixMilli())
+		_ = rdb.ZRemRangeByScore(ctx, "z:tokens:latest", "-inf", fmt.Sprintf("(%f", cutoff)).Err()
+		_ = rdb.ZRemRangeByScore(ctx, "z:"+cfg.PollerChain+":latest", "-inf", fmt.Sprintf("(%f", cutoff)).Err()
+	}
+	return nil
 }
 
 // daily clear at midnight UTC (token:* hashes, zsets, etag)
-func scheduleDailyClear(ctx context.Context, rdb *redis.Client, cfg config.Config) {
-	now := time.Now().UTC()
-	next := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Add(24 * time.Hour)
-	delay := time.Until(next)
-	log.Printf("daily clear scheduled at %s UTC (in %s)", next.Format(time.RFC3339), delay.Truncate(time.Second))
-
-	t := time.NewTimer(delay)
-	for {
-		select {
-		case <-ctx.Done():
-			if !t.Stop() {
-				<-t.C
-			}
-			return
-		case <-t.C:
-			start := time.Now()
-			cleared := clearAppKeys(ctx, rdb, cfg)
-			log.Printf("daily clear done: %d keys removed in %s", cleared, time.Since(start).Truncate(time.Millisecond))
-			t.Reset(24 * time.Hour)
-		}
-	}
-}
-
-func clearAppKeys(ctx context.Context, rdb *redis.Client, cfg config.Config) int64 {
-	var total int64
-	total += scanAndDel(ctx, rdb, "token:*")
-	keys := []string{"z:tokens:latest", "z:" + cfg.PollerChain + ":latest", etagKey}
-	if n, err := rdb.Del(ctx, keys...).Result(); err == nil {
-		total += n
-	} else {
-		log.Printf("clear del err: %v", err)
-	}
-	return total
-}
-
-func scanAndDel(ctx context.Context, rdb *redis.Client, pattern string) int64 {
-	var cursor uint64
-	var total int64
-	for {
-		keys, c, err := rdb.Scan(ctx, cursor, pattern, 1000).Result()
-		if err != nil {
-			log.Printf("scan err for %s: %v", pattern, err)
-			break
-		}
-		cursor = c
-		if len(keys) > 0 {
-			if n, err := rdb.Del(ctx, keys...).Result(); err == nil {
-				total += n
-			} else {
-				log.Printf("del err: %v", err)
-			}
-		}
-		if cursor == 0 {
-			break
-		}
-	}
-	return total
-}
+// removed daily clear; we maintain a rolling window via ZRemRangeByScore
 
 func deref(s *string) string {
 	if s == nil {

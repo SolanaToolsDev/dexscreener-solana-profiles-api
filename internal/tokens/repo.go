@@ -24,8 +24,8 @@ func (r *Repo) GetOut(ctx context.Context, addr string) (ProfileOut, error) {
 	return mapToOut(m), nil
 }
 
-func (r *Repo) ListLatestOut(ctx context.Context, limit int) ([]ProfileOut, error) {
-	addrs, err := r.rdb.ZRevRange(ctx, "z:sol:latest", 0, int64(limit-1)).Result()
+func (r *Repo) ListLatestOut(ctx context.Context, offset int, limit int) ([]ProfileOut, error) {
+	addrs, err := r.rdb.ZRevRange(ctx, "z:sol:latest", int64(offset), int64(offset+limit-1)).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -39,14 +39,19 @@ func (r *Repo) ListLatestOut(ctx context.Context, limit int) ([]ProfileOut, erro
 	}
 	out := make([]ProfileOut, 0, len(cmds))
 	for _, c := range cmds {
-		out = append(out, mapToOut(c.Val()))
+		m := c.Val()
+		// skip if hash expired or empty
+		if len(m) == 0 || m["tokenAddress"] == "" {
+			continue
+		}
+		out = append(out, mapToOut(m))
 	}
 	return out, nil
 }
 
-func (r *Repo) ListLatestByChainOut(ctx context.Context, chain string, limit int) ([]ProfileOut, error) {
+func (r *Repo) ListLatestByChainOut(ctx context.Context, chain string, offset int, limit int) ([]ProfileOut, error) {
 	key := "z:" + chain + ":latest"
-	addrs, err := r.rdb.ZRevRange(ctx, key, 0, int64(limit-1)).Result()
+	addrs, err := r.rdb.ZRevRange(ctx, key, int64(offset), int64(offset+limit-1)).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +65,11 @@ func (r *Repo) ListLatestByChainOut(ctx context.Context, chain string, limit int
 	}
 	out := make([]ProfileOut, 0, len(cmds))
 	for _, c := range cmds {
-		out = append(out, mapToOut(c.Val()))
+		m := c.Val()
+		if len(m) == 0 || m["tokenAddress"] == "" {
+			continue
+		}
+		out = append(out, mapToOut(m))
 	}
 	return out, nil
 }

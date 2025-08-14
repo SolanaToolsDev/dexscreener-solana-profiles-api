@@ -1,14 +1,14 @@
 ## API Starter (Go + Redis) for Dexscreener-style token profiles
 
 ### What this service does
-- Mirrors Dexscreener’s latest token profiles endpoint and serves it from your own API.
-  - Upstream: `https://api.dexscreener.com/token-profiles/latest/v1`
+- Serves a Dexscreener-compatible "latest token profiles" feed from your own API.
+  - Upstream source polled by the background poller: `DEX_URL` (defaults to Dexscreener)
   - Your API: `GET /token-profiles/latest/v1`
-  - ETag-aware requests to Dexscreener with Redis-backed caching to minimize upstream calls and stay within the 60 rpm limit.
-  - Returns JSON in Dexscreener-compatible shape. By default, results are filtered to a single chain (Solana), configurable via env or query.
-- Exposes basic token CRUD-style endpoints backed by Redis for simple storage and a “latest feed”.
+  - Returns JSON in Dexscreener-compatible shape, filtered to a single chain (default `solana`).
+  - Supports pagination with `limit` (max 200) and `offset` (zero-based).
+- Uses Redis to store profile hashes and a per-chain sorted set of latest tokens; the API reads from Redis only (no upstream call per request).
 - Provides middleware for IP rate limiting and request idempotency via Redis.
-- Production-ready service wiring with systemd and Caddy reverse proxy (TLS via Let’s Encrypt) for domain `tzen.ai`.
+- Production-ready wiring notes for systemd and Caddy (TLS via Let’s Encrypt) for `tzen.ai`.
 
 ### Tech stack
 - Go 1.22, Fiber v2
@@ -24,7 +24,7 @@
    ├─ redis/redis.go              # Redis client helpers & Lua eval
    ├─                            
    ├─ http/
-   │  ├─ router.go                # Fiber server, routes, caching proxy
+   │  ├─ router.go                # Fiber server, routes, paginated endpoint
    │  └─ middleware/
    │     ├─ ratelimit.go          # IP token-bucket using Redis + Lua
    │     └─ idempotency.go        # Idempotency via Redis SetNX
@@ -44,41 +44,19 @@
 - `IDEMP_TTL_SEC` (default `60`)
 - `RATE_LIMIT_RPS` (default `5`)
 - `RATE_LIMIT_BURST` (default `10`)
-- `POLL_INTERVAL_SEC` (default `10`)
+- `POLL_INTERVAL_SEC` (default `10`) – how often the poller checks upstream
 - `DEX_URL` (default Dexscreener latest profiles URL)
-- `POLLER_CHAIN` (default `solana`) – also controls default chain filter for the proxy endpoint
-- `TOKEN_TTL_HOURS` (default `72`)
+- `POLLER_CHAIN` (default `solana`) – enforced chain for both poller and API output
+- `TOKEN_TTL_HOURS` (default `72`) – rolling retention window for latest sets and token hashes
 
 
-### Endpoints
-- Liveness & readiness
-  - `GET /healthz` → `ok`
-  - `GET /readyz` → checks Redis, returns `ready`
-
-- Dexscreener mirror (cached + filtered)
-  - `GET /token-profiles/latest/v1`
-  - Behavior:
-    - On each request, use Redis-cached body (fresh within 10s) if available.
-    - Otherwise fetch from `DEX_URL` with `If-None-Match` using the stored ETag.
-    - On 304 Not Modified, serve cached body.
-    - On 200 OK, store new ETag and body in Redis.
-    - Response is filtered to a single chain ID (default `POLLER_CHAIN` or `solana`).
-    - Override via `?chain=<chainId>` query, e.g. `?chain=solana`.
-  - Redis keys used:
-    - `dex:latest:etag` – last seen ETag
-    - `dex:latest:body` – last response body (raw JSON)
-    - `dex:latest:ts` – last refresh unix seconds
-
-- Tokens (simple storage)
-  - `POST /tokens` – create minimal token record (idempotent via `Idempotency-Key` header; TTL controlled by `TOKEN_TTL_HOURS` if using the poller)
-  - `GET /tokens?limit=50` – list latest tokens
-  - `GET /tokens/:mint` – get one token
-  - Helper feed (Dex-like array of ProfileOut):
-    - `GET /feed/latest?limit=50`
-
-- Repo-backed alias (from Redis only)
-  - `GET /token-profiles/latest/by-chain?limit=50`
-  - Returns latest profiles for the default chain (Solana) from Redis ZSETs (no upstream call)
+### Endpoint
+- `GET /token-profiles/latest/v1`
+  - Query params:
+    - `limit` (int, 1..200; default 50)
+    - `offset` (int, >=0; default 0)
+  - Always filtered to the chain set by `POLLER_CHAIN` (default `solana`).
+  - Returns an array of profiles in Dexscreener-compatible shape.
 
 
 
@@ -88,7 +66,8 @@
 
 ### Poller mode
 - Command: `go run ./cmd/app -mode=poller` (or `make poller`)
-- Periodically fetches `DEX_URL` with ETag handling, writes token hashes and ZSETs into Redis, and schedules a daily clear of app keys at midnight UTC.
+- Periodically fetches `DEX_URL` with ETag handling (If-None-Match), writes token hashes and ZSETs into Redis.
+- Rolling retention: after each poll, trims `z:tokens:latest` and `z:<chain>:latest` by score to keep only entries within `TOKEN_TTL_HOURS`.
 - Keys used by poller:
   - `token:<address>` – Redis hash with fields matching Dex output
   - `z:tokens:latest` – global recency ZSET
@@ -102,12 +81,9 @@ make api     # runs the Fiber API on $PORT (default 3000)
 make poller  # runs the poller (optional)
 ```
 
-Example queries:
+Example query:
 ```
-curl -s http://127.0.0.1:3000/healthz
-curl -s http://127.0.0.1:3000/readyz
-curl -s 'http://127.0.0.1:3000/token-profiles/latest/v1?chain=solana'
-curl -s 'http://127.0.0.1:3000/feed/latest?limit=50'
+curl -s 'http://127.0.0.1:3000/token-profiles/latest/v1?limit=50&offset=0'
 ```
 
 ### Production notes
@@ -142,8 +118,8 @@ curl -s 'http://127.0.0.1:3000/feed/latest?limit=50'
   - Backup Redis (AOF/RDB) and test restores; keep infra-as-code for Caddy and systemd
 
 ### Design details
-- Dex mirror path returns the upstream body with minimal processing, but filtered to the requested chain for consistency with your needs.
-- ETag + 10s freshness window avoids hammering Dexscreener and respects their documented rate limit.
+- The background poller handles upstream ETag/HTTP caching and persistence into Redis.
+- The API endpoint reads from Redis ZSETs and serves a paginated, chain-filtered view (no upstream calls per request).
 - All rate limiting and idempotency state is stored in Redis to keep the app stateless.
 
 ### Environment defaults recap
