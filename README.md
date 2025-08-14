@@ -5,7 +5,6 @@
   - Upstream source polled by the background poller: `DEX_URL` (defaults to Dexscreener)
   - Your API: `GET /token-profiles/latest/v1`
   - Returns JSON in Dexscreener-compatible shape, filtered to a single chain (default `solana`).
-  - Supports pagination with `limit` (max 200) and `offset` (zero-based).
 - Uses Redis to store profile hashes and a per-chain sorted set of latest tokens; the API reads from Redis only (no upstream call per request).
 - Provides middleware for IP rate limiting and request idempotency via Redis.
 - Production-ready wiring notes for systemd and Caddy (TLS via Let’s Encrypt) for `tzen.ai`.
@@ -24,7 +23,7 @@
    ├─ redis/redis.go              # Redis client helpers & Lua eval
    ├─                            
    ├─ http/
-   │  ├─ router.go                # Fiber server, routes, paginated endpoint
+   │  ├─ router.go                # Fiber server, routes, endpoint
    │  └─ middleware/
    │     ├─ ratelimit.go          # IP token-bucket using Redis + Lua
    │     └─ idempotency.go        # Idempotency via Redis SetNX
@@ -52,11 +51,8 @@
 
 ### Endpoint
 - `GET /token-profiles/latest/v1`
-  - Query params:
-    - `limit` (int, 1..200; default 50)
-    - `offset` (int, >=0; default 0)
   - Always filtered to the chain set by `POLLER_CHAIN` (default `solana`).
-  - Returns an array of profiles in Dexscreener-compatible shape.
+  - Returns up to the latest 50 profiles in Dexscreener-compatible shape.
 
 
 
@@ -83,7 +79,7 @@ make poller  # runs the poller (optional)
 
 Example query:
 ```
-curl -s 'http://127.0.0.1:3000/token-profiles/latest/v1?limit=50&offset=0'
+curl -s 'http://127.0.0.1:3000/token-profiles/latest/v1'
 ```
 
 ### Production notes
@@ -111,7 +107,7 @@ curl -s 'http://127.0.0.1:3000/token-profiles/latest/v1?limit=50&offset=0'
   - Run API under a non-root user; harden systemd (NoNewPrivileges, ProtectSystem=strict, PrivateTmp, resource limits)
   - In Caddy, enable HSTS and tune timeouts; configure CORS policy as needed
 - API hygiene
-  - Enforce strict pagination and parameter validation; return 429 with `Retry-After` when rate-limited
+  - Enforce parameter validation; return 429 with `Retry-After` when rate-limited
   - Set Cache-Control/ETag on your responses to leverage client/CDN caching
 - Deployment & DR
   - CI/CD with tests (go test/vet/staticcheck), containerization, and blue/green or canary deploys
@@ -119,7 +115,7 @@ curl -s 'http://127.0.0.1:3000/token-profiles/latest/v1?limit=50&offset=0'
 
 ### Design details
 - The background poller handles upstream ETag/HTTP caching and persistence into Redis.
-- The API endpoint reads from Redis ZSETs and serves a paginated, chain-filtered view (no upstream calls per request).
+- The API endpoint reads from Redis ZSETs and serves a chain-filtered latest view (no upstream calls per request).
 - All rate limiting and idempotency state is stored in Redis to keep the app stateless.
 
 ### Environment defaults recap
