@@ -152,6 +152,6 @@ curl -s 'http://127.0.0.1:3000/feed/latest?limit=50'
 - Idempotency TTL: `IDEMP_TTL_SEC=60`.
 
 ### License
-Proprietary (adjust as needed).
+MIT. See `LICENSE` for details.
 
 
